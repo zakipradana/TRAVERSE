@@ -312,6 +312,7 @@ int main() {
         else if (pilihan == 3) {
             tampilkanKatalog();
         }
+        
         else if (pilihan == 4) {
             menuHapusTempat();
         }
