@@ -2,7 +2,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
-#include "travel.h"
+#include "traverse.h"
 
 using namespace std;
 
