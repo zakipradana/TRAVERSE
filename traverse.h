@@ -1,5 +1,5 @@
-#ifndef TRAVEL_H
-#define TRAVEL_H
+#ifndef traverse_h
+#define traverse_h
 
 #include <string>
 using namespace std;
