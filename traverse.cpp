@@ -6,10 +6,21 @@
 
 using namespace std;
 
-Kategori* kepala = nullptr;
-int idTerakhir = 0;
+// State sistem (hanya terlihat di file ini)
+static Kategori* kepala = nullptr;              // MLL: list utama kategori
+static NodeBST* akarBooking = nullptr;          // [BST] indeks kode booking
+static NodeBST* akarTempat = nullptr;           // [BST] indeks "nama (kategori)"
+static NodeAntrean* antreanDepan = nullptr;     // [QUEUE] sisi depan antrean
+static NodeAntrean* antreanBelakang = nullptr;  // [QUEUE] sisi belakang antrean
+static Aksi* tumpukan = nullptr;                // [STACK] puncak stack undo
+static int idTerakhir = 0;
 
 namespace {
+
+// Konstanta dan data kendaraan (kode awal)
+
+// [H-3] Pembayaran, pembatalan, perubahan, dan undo hanya boleh sampai H-3
+const int BATAS_H_MIN = 3;
 
 int KAPASITAS[JUMLAH_JENIS] = {7, 15, 30, 55};
 string NAMA_JENIS[JUMLAH_JENIS] = {"Mobil Pribadi", "Travel", "Minibus", "Bigbus"};
@@ -23,13 +34,14 @@ string MODEL[JUMLAH_JENIS][4] = {
 };
 int JUMLAH_MODEL[JUMLAH_JENIS] = {4, 2, 2, 2};
 
-// Item sementara untuk daftar yang diurutkan (Daftar wisata terurut dan Statistik)
+// Item sementara untuk statistik (linked list sementara)
 struct Item {
     string label;
-    string nama;
     int nilai;
     Item* next;
 };
+
+//Kode dan tanggal
 
 string buatKode(int id) {
     string angka = to_string(id);
@@ -64,6 +76,23 @@ int selisihHari(Tanggal dari, Tanggal ke) {
     return static_cast<int>(round(detik / 86400.0));
 }
 
+// [H-3] Sisa hari dari hari ini sampai keberangkatan
+int sisaHari(Pemesanan* p) {
+    return selisihHari(hariIni(), p->tanggalBerangkat);
+}
+
+// [H-3] Sisa hari minimal 3: masih boleh bayar, batal, ubah, atau undo
+bool masihDalamBatas(Pemesanan* p) {
+    return sisaHari(p) >= BATAS_H_MIN;
+}
+
+// [BST] Kunci indeks tempat: "nama (kategori)" agar unik antar kategori
+string kunciTempat(string kat, string nama) {
+    return nama + " (" + kat + ")";
+}
+
+// ----- Catatan, daftar, dan penumpang (kode awal) -----
+
 void tambahCatatan(Pemesanan* p, string teks) {
     Catatan* baru = new Catatan{teks, nullptr};
     if (p->riwayat == nullptr) {
@@ -94,14 +123,15 @@ void hapusSemuaPemesanan(Pemesanan* p) {
 }
 
 // Total kursi dari anggota saja (tanpa pemesan)
-int kursiDaftar(Penumpang* kepala) {
+int kursiDaftar(Penumpang* awal) {
     int total = 0;
-    for (Penumpang* q = kepala; q != nullptr; q = q->next) {
+    for (Penumpang* q = awal; q != nullptr; q = q->next) {
         total += kursiAnggota(q->data);
     }
     return total;
 }
 
+// Jumlah pemesanan aktif (tidak batal) pada satu tempat
 int hitungAktif(TempatWisata* t) {
     int aktif = 0;
     for (Pemesanan* p = t->daftarPemesanan; p != nullptr; p = p->next) {
@@ -110,26 +140,239 @@ int hitungAktif(TempatWisata* t) {
     return aktif;
 }
 
-// Urutan nama tempat, lalu label
-bool sebelumNama(Item* a, Item* b) {
-    if (a->nama != b->nama) return a->nama < b->nama;
-    return a->label < b->label;
+// [STACK] Menghapus anggota paling belakang (dipakai saat undo tambah penumpang)
+void hapusPenumpangTerakhir(Pemesanan* p) {
+    if (p->daftarPenumpang == nullptr) return;
+    if (p->daftarPenumpang->next == nullptr) {
+        delete p->daftarPenumpang;
+        p->daftarPenumpang = nullptr;
+        return;
+    }
+    Penumpang* q = p->daftarPenumpang;
+    while (q->next->next != nullptr) q = q->next;
+    delete q->next;
+    q->next = nullptr;
 }
 
-// Urutan jumlah terbanyak dulu, lalu label
-bool sebelumNilai(Item* a, Item* b) {
+// ----- [BST] AVL -----
+
+int tinggiNode(const NodeBST* n) {
+    return n ? n->tinggi : 0;
+}
+
+void perbaruiTinggi(NodeBST* n) {
+    n->tinggi = 1 + max(tinggiNode(n->kiri), tinggiNode(n->kanan));
+}
+
+// [BST] Rotasi kanan (kasus kiri-kiri)
+NodeBST* rotasiKanan(NodeBST* y) {
+    NodeBST* x = y->kiri;
+    NodeBST* t2 = x->kanan;
+    x->kanan = y;
+    y->kiri = t2;
+    perbaruiTinggi(y);
+    perbaruiTinggi(x);
+    return x;
+}
+
+// [BST] Rotasi kiri (kasus kanan-kanan)
+NodeBST* rotasiKiri(NodeBST* x) {
+    NodeBST* y = x->kanan;
+    NodeBST* t2 = y->kiri;
+    y->kiri = x;
+    x->kanan = t2;
+    perbaruiTinggi(x);
+    perbaruiTinggi(y);
+    return y;
+}
+
+// [BST] Menyeimbangkan satu node setelah sisip atau hapus
+NodeBST* seimbangkan(NodeBST* n) {
+    perbaruiTinggi(n);
+    int bal = tinggiNode(n->kiri) - tinggiNode(n->kanan);
+    if (bal > 1) {
+        if (tinggiNode(n->kiri->kiri) < tinggiNode(n->kiri->kanan))
+            n->kiri = rotasiKiri(n->kiri);
+        return rotasiKanan(n);
+    }
+    if (bal < -1) {
+        if (tinggiNode(n->kanan->kanan) < tinggiNode(n->kanan->kiri))
+            n->kanan = rotasiKanan(n->kanan);
+        return rotasiKiri(n);
+    }
+    return n;
+}
+
+// [BST] Menyisipkan node baru. Kunci harus unik (dicek oleh pemanggil).
+NodeBST* sisipBST(NodeBST* n, const string& kunci, Pemesanan* p, TempatWisata* t) {
+    if (!n) {
+        NodeBST* baru = new NodeBST();
+        baru->kunci = kunci;
+        baru->pemesanan = p;
+        baru->tempat = t;
+        baru->kiri = nullptr;
+        baru->kanan = nullptr;
+        baru->tinggi = 1;
+        return baru;
+    }
+    if (kunci < n->kunci) n->kiri = sisipBST(n->kiri, kunci, p, t);
+    else if (kunci > n->kunci) n->kanan = sisipBST(n->kanan, kunci, p, t);
+    else return n;
+    return seimbangkan(n);
+}
+
+// [BST] Pencarian biner: O(log n) karena pohon seimbang
+NodeBST* cariBST(NodeBST* n, const string& kunci) {
+    while (n) {
+        if (kunci == n->kunci) return n;
+        n = (kunci < n->kunci) ? n->kiri : n->kanan;
+    }
+    return nullptr;
+}
+
+// [BST] Node terkecil di subpohon, dipakai saat hapus
+NodeBST* nodeTerkecil(NodeBST* n) {
+    while (n->kiri) n = n->kiri;
+    return n;
+}
+
+// [BST] Hapus node dengan kunci tertentu, lalu seimbangkan ulang
+NodeBST* hapusBST(NodeBST* n, const string& kunci) {
+    if (!n) return nullptr;
+    if (kunci < n->kunci) {
+        n->kiri = hapusBST(n->kiri, kunci);
+    } else if (kunci > n->kunci) {
+        n->kanan = hapusBST(n->kanan, kunci);
+    } else {
+        if (!n->kiri || !n->kanan) {
+            NodeBST* sisa = n->kiri ? n->kiri : n->kanan;
+            delete n;
+            return sisa;
+        }
+        NodeBST* pengganti = nodeTerkecil(n->kanan);
+        string k = pengganti->kunci;  // salin dulu, node pengganti akan dihapus
+        n->kunci = k;
+        n->pemesanan = pengganti->pemesanan;
+        n->tempat = pengganti->tempat;
+        n->kanan = hapusBST(n->kanan, k);
+    }
+    return seimbangkan(n);
+}
+
+// [BST] Hanya membebaskan node indeks. Data pemesanan dan tempat tidak ikut dihapus.
+void hapusSemuaBST(NodeBST* n) {
+    if (!n) return;
+    hapusSemuaBST(n->kiri);
+    hapusSemuaBST(n->kanan);
+    delete n;
+}
+
+// [BST] Inorder menghasilkan urutan kunci yang sudah terurut
+void cetakInorder(NodeBST* n, int& no) {
+    if (!n) return;
+    cetakInorder(n->kiri, no);
+    cout << no++ << ". " << n->kunci << "\n";
+    cetakInorder(n->kanan, no);
+}
+
+// [QUEUE] Antrean konfirmasi pembayaran
+// Isi antrean = pemesanan yang statusnya BELUM_LUNAS, urut sesuai waktu masuk
+
+// [QUEUE] Masuk ke belakang antrean
+void enqueue(Pemesanan* p) {
+    NodeAntrean* baru = new NodeAntrean{p, nullptr};
+    if (antreanBelakang) antreanBelakang->next = baru;
+    else antreanDepan = baru;
+    antreanBelakang = baru;
+}
+
+// [QUEUE] Cek apakah pemesanan sudah ada di antrean
+bool adaDiAntrean(Pemesanan* p) {
+    for (NodeAntrean* n = antreanDepan; n; n = n->next) {
+        if (n->data == p) return true;
+    }
+    return false;
+}
+
+// [QUEUE] Mengeluarkan pemesanan dari posisi mana pun, urutan yang lain tetap
+void hapusDariAntrean(Pemesanan* p) {
+    NodeAntrean* prev = nullptr;
+    NodeAntrean* n = antreanDepan;
+    while (n && n->data != p) {
+        prev = n;
+        n = n->next;
+    }
+    if (!n) return;
+    if (prev) prev->next = n->next;
+    else antreanDepan = n->next;
+    if (antreanBelakang == n) antreanBelakang = prev;
+    delete n;
+}
+
+// [QUEUE] Aturan: pemesanan ada di antrean jika dan hanya jika statusnya BELUM_LUNAS
+void sinkronAntrean(Pemesanan* p) {
+    bool ada = adaDiAntrean(p);
+    if (p->status == BELUM_LUNAS && !ada) enqueue(p);
+    else if (p->status != BELUM_LUNAS && ada) hapusDariAntrean(p);
+}
+
+// ----- [STACK] Aksi untuk undo -----
+
+// [STACK] Menyimpan keadaan sebelum perubahan, lalu mendorongnya ke puncak stack
+void catatAksi(int tipe, string deskripsi, Pemesanan* p, int statusLama, int jenisLama, string modelLama) {
+    Aksi* a = new Aksi{tipe, deskripsi, p, statusLama, jenisLama, modelLama, nullptr};
+    a->next = tumpukan;
+    tumpukan = a;
+}
+
+// [STACK] Membuang aksi milik satu pemesanan, dipakai sebelum pemesanan dibebaskan
+void bersihkanAksiUntuk(Pemesanan* p) {
+    Aksi** pp = &tumpukan;
+    while (*pp) {
+        if ((*pp)->p == p) {
+            Aksi* hapus = *pp;
+            *pp = hapus->next;
+            delete hapus;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+}
+
+// [STACK] Mengosongkan seluruh stack
+void hapusSemuaAksi() {
+    while (tumpukan) {
+        Aksi* nx = tumpukan->next;
+        delete tumpukan;
+        tumpukan = nx;
+    }
+}
+
+// [STACK][QUEUE] Konfirmasi pembayaran, dipakai manual dan dari antrean.
+void konfirmasiInternal(Pemesanan* p, string deskripsi) {
+    catatAksi(AKSI_KONFIRMASI, deskripsi, p, p->status, p->jenis, p->model);
+    p->status = LUNAS;
+    tambahCatatan(p, "Pembayaran dikonfirmasi (lunas).");
+    sinkronAntrean(p);
+}
+
+// Urutan item statistik (linked list sementara)
+
+// Jumlah pemesanan terbanyak dulu, lalu nama
+bool lebihDulu(Item* a, Item* b) {
     if (a->nilai != b->nilai) return a->nilai > b->nilai;
     return a->label < b->label;
 }
 
-void sisipUrut(Item*& kepala, Item* baru, bool (*sebelum)(Item*, Item*)) {
-    if (kepala == nullptr || sebelum(baru, kepala)) {
-        baru->next = kepala;
-        kepala = baru;
+// Sisip terurut untuk statistik
+void sisipUrut(Item*& daftar, Item* baru) {
+    if (!daftar || lebihDulu(baru, daftar)) {
+        baru->next = daftar;
+        daftar = baru;
         return;
     }
-    Item* p = kepala;
-    while (p->next != nullptr && !sebelum(baru, p->next)) p = p->next;
+    Item* p = daftar;
+    while (p->next && !lebihDulu(baru, p->next)) p = p->next;
     baru->next = p->next;
     p->next = baru;
 }
@@ -144,7 +387,7 @@ void hapusDaftarItem(Item* k) {
 
 }  // namespace
 
-// ===== Fungsi bantu =====
+//Fungsi bantu kendaraan dan tampilan (publik, sesuai traverse.h)
 
 int kapasitasJenis(int jenis) {
     return KAPASITAS[jenis];
@@ -199,7 +442,7 @@ int hitungTercatat(Pemesanan* p) {
 
 string namaStatus(int status) {
     if (status == BELUM_LUNAS) return "Belum lunas";
-    if (status == LUNAS)       return "Lunas";
+    if (status == LUNAS) return "Lunas";
     return "Batal";
 }
 
@@ -228,31 +471,56 @@ void cetakDetailPemesanan(Pemesanan* p) {
     }
 }
 
-Penumpang* sisipAkhirPenumpang(Penumpang* kepala, DataOrang d) {
+Penumpang* sisipAkhirPenumpang(Penumpang* awal, DataOrang d) {
     Penumpang* baru = new Penumpang{d, nullptr};
-    if (kepala == nullptr) return baru;
-    Penumpang* q = kepala;
+    if (awal == nullptr) return baru;
+    Penumpang* q = awal;
     while (q->next != nullptr) q = q->next;
     q->next = baru;
-    return kepala;
+    return awal;
 }
 
-void hapusDaftarPenumpang(Penumpang* kepala) {
-    while (kepala) {
-        Penumpang* nx = kepala->next;
-        delete kepala;
-        kepala = nx;
+void hapusDaftarPenumpang(Penumpang* awal) {
+    while (awal) {
+        Penumpang* nx = awal->next;
+        delete awal;
+        awal = nx;
     }
 }
 
-// ===== Inisialisasi dan pembersihan data =====
+// ===== Inisialisasi dan pembersihan =====
 
+// [UBAH] Menginisialisasi juga BST, queue, dan stack
 void inisialisasiSistem() {
     kepala = nullptr;
+    akarBooking = nullptr;      // [BST]
+    akarTempat = nullptr;       // [BST]
+    antreanDepan = nullptr;     // [QUEUE]
+    antreanBelakang = nullptr;  // [QUEUE]
+    tumpukan = nullptr;         // [STACK]
     idTerakhir = 0;
 }
 
+// [UBAH] Membersihkan BST, queue, dan stack sebelum MLL dibebaskan
 void bersihkanSistem() {
+    // [BST] Indeks hanya menyimpan penunjuk, jadi dibersihkan dulu
+    hapusSemuaBST(akarBooking);
+    akarBooking = nullptr;
+    hapusSemuaBST(akarTempat);
+    akarTempat = nullptr;
+
+    // [QUEUE] Antrean hanya menyimpan penunjuk
+    while (antreanDepan) {
+        NodeAntrean* n = antreanDepan->next;
+        delete antreanDepan;
+        antreanDepan = n;
+    }
+    antreanBelakang = nullptr;
+
+    // [STACK] Stack hanya menyimpan penunjuk
+    hapusSemuaAksi();
+
+    // MLL: data sebenarnya dibebaskan di sini
     Kategori* k = kepala;
     while (k) {
         TempatWisata* t = k->daftarTempat;
@@ -269,8 +537,9 @@ void bersihkanSistem() {
     kepala = nullptr;
 }
 
-// ===== Pencarian internal =====
+// Pencarian internal 
 
+// MLL: pencarian kategori (kode awal)
 Kategori* cariKategori(string nama) {
     for (Kategori* k = kepala; k != nullptr; k = k->next) {
         if (k->nama == nama) return k;
@@ -278,17 +547,15 @@ Kategori* cariKategori(string nama) {
     return nullptr;
 }
 
+// [UBAH][BST] Pencarian tempat lewat indeks AVL, bukan penelusuran MLL
 TempatWisata* cariTempat(string namaKategori, string namaTempat) {
-    Kategori* k = cariKategori(namaKategori);
-    if (!k) return nullptr;
-    for (TempatWisata* t = k->daftarTempat; t != nullptr; t = t->next) {
-        if (t->nama == namaTempat) return t;
-    }
-    return nullptr;
+    NodeBST* n = cariBST(akarTempat, kunciTempat(namaKategori, namaTempat));
+    return n ? n->tempat : nullptr;
 }
 
-// ===== Pengelolaan tempat wisata =====
+//Pengelolaan tempat wisata
 
+// MLL: menambah kategori di akhir list (kode awal)
 bool tambahKategori(string nama) {
     if (nama.empty() || cariKategori(nama) != nullptr) return false;
 
@@ -303,6 +570,7 @@ bool tambahKategori(string nama) {
     return true;
 }
 
+// [UBAH][BST] Menambah tempat ke MLL dan juga ke indeks AVL
 bool tambahTempat(string namaKategori, string namaTempat) {
     Kategori* k = cariKategori(namaKategori);
     if (!k || namaTempat.empty() || cariTempat(namaKategori, namaTempat) != nullptr) {
@@ -317,9 +585,12 @@ bool tambahTempat(string namaKategori, string namaTempat) {
         while (t->next) t = t->next;
         t->next = baru;
     }
+    // [BST] Daftarkan juga ke indeks nama tempat
+    akarTempat = sisipBST(akarTempat, kunciTempat(namaKategori, namaTempat), nullptr, baru);
     return true;
 }
 
+// [UBAH][BST][STACK][QUEUE] Hapus tempat hanya jika semua pemesanannya batal
 bool hapusTempat(string namaKategori, string namaTempat, string& pesan) {
     Kategori* k = cariKategori(namaKategori);
     if (!k) {
@@ -345,8 +616,15 @@ bool hapusTempat(string namaKategori, string namaTempat, string& pesan) {
         }
     }
 
-    // Tersisa hanya pemesanan batal, ikut dibersihkan
+    // Semua pemesanan di sini sudah batal. Lepaskan dari BST dan stack dulu.
+    for (Pemesanan* p = t->daftarPemesanan; p != nullptr; p = p->next) {
+        akarBooking = hapusBST(akarBooking, p->kodeBooking);  // [BST]
+        bersihkanAksiUntuk(p);                                // [STACK]
+        // [QUEUE] Pemesanan batal sudah keluar dari antrean lewat sinkronAntrean
+    }
     hapusSemuaPemesanan(t->daftarPemesanan);
+
+    akarTempat = hapusBST(akarTempat, kunciTempat(namaKategori, namaTempat));  // [BST]
     if (prev) prev->next = t->next;
     else k->daftarTempat = t->next;
     delete t;
@@ -355,6 +633,7 @@ bool hapusTempat(string namaKategori, string namaTempat, string& pesan) {
     return true;
 }
 
+// MLL: menampilkan katalog (kode awal)
 void tampilkanKatalog() {
     if (kepala == nullptr) {
         cout << "Katalog masih kosong.\n";
@@ -371,6 +650,7 @@ void tampilkanKatalog() {
     }
 }
 
+// MLL: daftar bernomor untuk menu (kode awal)
 int cetakNomorKategori() {
     int no = 0;
     for (Kategori* k = kepala; k != nullptr; k = k->next) {
@@ -409,53 +689,40 @@ string tempatKe(string namaKategori, int nomor) {
     return "";
 }
 
-// ===== Pencarian =====
+// Pencarian (BST)
 
+// [UBAH][BST] Cari Tiket: pencarian O(log n) lewat indeks kode booking
 Pemesanan* cariPemesanan(string kode) {
-    for (Kategori* k = kepala; k != nullptr; k = k->next) {
-        for (TempatWisata* t = k->daftarTempat; t != nullptr; t = t->next) {
-            for (Pemesanan* p = t->daftarPemesanan; p != nullptr; p = p->next) {
-                if (p->kodeBooking == kode) return p;
-            }
-        }
-    }
-    return nullptr;
+    NodeBST* n = cariBST(akarBooking, kode);
+    return n ? n->pemesanan : nullptr;
 }
 
+// [UBAH][BST] Daftar Wisata Terurut: inorder pada indeks tempat
 void tampilkanWisataTerurut() {
-    Item* daftar = nullptr;
-    for (Kategori* k = kepala; k != nullptr; k = k->next) {
-        for (TempatWisata* t = k->daftarTempat; t != nullptr; t = t->next) {
-            Item* baru = new Item{t->nama + " (" + k->nama + ")", t->nama, 0, nullptr};
-            sisipUrut(daftar, baru, sebelumNama);
-        }
-    }
-    if (daftar == nullptr) {
+    if (akarTempat == nullptr) {
         cout << "Belum ada tempat wisata.\n";
         return;
     }
     int no = 1;
-    for (Item* it = daftar; it != nullptr; it = it->next) {
-        cout << no++ << ". " << it->label << "\n";
-    }
-    hapusDaftarItem(daftar);
+    cetakInorder(akarTempat, no);
 }
 
-// ===== Pemesanan =====
+//Pemesanan 
 
-bool buatPemesanan(string namaKategori, string namaTempat,
-                                 DataOrang pemesan, Penumpang* anggota,
-                                 int jenis, string model,
-                                 Tanggal tanggal,
-                                 string& kodeHasil, string& pesan) {
+// [UBAH][BST][QUEUE][H-3] Booking: MLL + indeks BST + masuk antrean konfirmasi
+bool buatPemesanan(string namaKategori, string namaTempat, DataOrang pemesan, Penumpang* anggota,
+                   int jenis, string model, Tanggal tanggal, string& kodeHasil, string& pesan) {
     TempatWisata* t = cariTempat(namaKategori, namaTempat);
+    int sisa = selisihHari(hariIni(), tanggal);
     string err;
     if (!t) {
         err = "Tempat wisata tidak ditemukan.";
     } else if (pemesan.nama.empty()) {
         err = "Nama pemesan tidak boleh kosong.";
-    } else if (selisihHari(hariIni(), tanggal) < 0) {
+    } else if (sisa < 0) {
         err = "Tanggal keberangkatan sudah lewat.";
+    } else if (sisa < BATAS_H_MIN) {                    // [H-3]
+        err = "Booking tidak bisa dibuat: batas pembayaran H-3 untuk tanggal ini sudah lewat.";
     } else if (1 + kursiDaftar(anggota) > kapasitasJenis(jenis)) {
         err = "Jumlah kursi melebihi kapasitas kendaraan.";
     } else if (!modelValid(jenis, model)) {
@@ -477,13 +744,12 @@ bool buatPemesanan(string namaKategori, string namaTempat,
     baru->tanggalBerangkat = tanggal;
     baru->status = BELUM_LUNAS;
     baru->riwayat = nullptr;
-    baru->daftarPenumpang = anggota;  // daftar anggota dipindahkan ke pemesanan
+    baru->daftarPenumpang = anggota;
     baru->next = nullptr;
 
-    tambahCatatan(baru, "Booking dibuat: " + namaJenis(jenis) + " (" + model +
-                        "), total " + to_string(hitungTercatat(baru)) + " orang.");
+    tambahCatatan(baru, "Booking dibuat: " + namaJenis(jenis) + " (" + model + "), total " + to_string(hitungTercatat(baru)) + " orang.");
 
-    // Sisipkan di akhir cabang pemesanan milik tempat ini
+    // MLL: sisip di akhir cabang pemesanan milik tempat ini
     if (t->daftarPemesanan == nullptr) {
         t->daftarPemesanan = baru;
     } else {
@@ -492,21 +758,30 @@ bool buatPemesanan(string namaKategori, string namaTempat,
         q->next = baru;
     }
 
+    // [BST] Indeks kode booking
+    akarBooking = sisipBST(akarBooking, baru->kodeBooking, baru, nullptr);
+
+    // [QUEUE] Masuk antrean konfirmasi karena belum lunas
+    sinkronAntrean(baru);
+
     kodeHasil = baru->kodeBooking;
     pesan = "Booking berhasil.";
     return true;
 }
 
-bool tambahPenumpang(string kode, DataOrang anggota,
-                                   int jenisBaru, string modelBaru,
-                                   string& pesan) {
-    Pemesanan* p = cariPemesanan(kode);
+// [UBAH][STACK][QUEUE][H-3] Tambah penumpang: dicatat ke stack untuk undo
+bool tambahPenumpang(string kode, DataOrang anggota, int jenisBaru, string modelBaru, string& pesan) {
+    Pemesanan* p = cariPemesanan(kode);  // [BST]
     if (!p) {
         pesan = "Kode booking tidak ditemukan.";
         return false;
     }
     if (p->status == BATAL) {
         pesan = "Pemesanan sudah dibatalkan.";
+        return false;
+    }
+    if (!masihDalamBatas(p)) {           // [H-3]
+        pesan = "Penambahan penumpang hanya bisa dilakukan sampai H-3 sebelum keberangkatan.";
         return false;
     }
 
@@ -518,6 +793,10 @@ bool tambahPenumpang(string kode, DataOrang anggota,
 
     string catatan = "Tambah penumpang: " + anggota.nama + " (" + to_string(anggota.umur) + " th)";
     bool gantiKendaraan = (jenisBaru != p->jenis) || (modelBaru != p->model);
+
+    // [STACK] Simpan keadaan sebelum perubahan untuk undo
+    catatAksi(AKSI_TAMBAH, "tambah penumpang " + anggota.nama + " ke " + p->kodeBooking,
+              p, p->status, p->jenis, p->model);
 
     if (gantiKendaraan) {
         catatan += ". Kendaraan diganti dari " + namaJenis(p->jenis) + " (" + p->model +
@@ -531,15 +810,17 @@ bool tambahPenumpang(string kode, DataOrang anggota,
         p->model = modelBaru;
     }
 
-    p->daftarPenumpang = sisipAkhirPenumpang(p->daftarPenumpang, anggota);
+    p->daftarPenumpang = sisipAkhirPenumpang(p->daftarPenumpang, anggota);  // MLL
     tambahCatatan(p, catatan);
+    sinkronAntrean(p);  // [QUEUE] jika kembali belum lunas, masuk lagi ke antrean
 
     pesan = "Penumpang berhasil ditambahkan.";
     return true;
 }
 
+// [UBAH][QUEUE][H-3] Konfirmasi manual pembayaran
 bool konfirmasiBayar(string kode, string& pesan) {
-    Pemesanan* p = cariPemesanan(kode);
+    Pemesanan* p = cariPemesanan(kode);  // [BST]
     if (!p) {
         pesan = "Kode booking tidak ditemukan.";
         return false;
@@ -552,15 +833,19 @@ bool konfirmasiBayar(string kode, string& pesan) {
         pesan = "Pemesanan ini sudah lunas.";
         return false;
     }
+    if (!masihDalamBatas(p)) {           // [H-3]
+        pesan = "Batas pembayaran H-3 sudah lewat, pemesanan ini sudah dibatalkan otomatis.";
+        return false;
+    }
 
-    p->status = LUNAS;
-    tambahCatatan(p, "Pembayaran dikonfirmasi (lunas).");
+    konfirmasiInternal(p, "konfirmasi pembayaran " + p->kodeBooking);  // [STACK][QUEUE]
     pesan = "Pembayaran berhasil dikonfirmasi.";
     return true;
 }
 
+// [UBAH][QUEUE] Batalkan pemesanan: keluar dari antrean
 bool batalkanPemesanan(string kode, string& pesan) {
-    Pemesanan* p = cariPemesanan(kode);
+    Pemesanan* p = cariPemesanan(kode);  // [BST]
     if (!p) {
         pesan = "Kode booking tidak ditemukan.";
         return false;
@@ -570,23 +855,26 @@ bool batalkanPemesanan(string kode, string& pesan) {
         return false;
     }
 
-    int sisa = selisihHari(hariIni(), p->tanggalBerangkat);
+    int sisa = sisaHari(p);  // [H-3]
     if (sisa < 0) {
         pesan = "Tanggal keberangkatan sudah lewat, pembatalan tidak bisa dilakukan.";
         return false;
     }
-    if (sisa < 3) {
+    if (sisa < BATAS_H_MIN) {
         pesan = "Pembatalan hanya bisa dilakukan minimal H-3 sebelum keberangkatan. "
                 "Sisa waktu: " + to_string(sisa) + " hari.";
         return false;
     }
 
+    catatAksi(AKSI_BATAL, "pembatalan " + p->kodeBooking, p, p->status, p->jenis, p->model);  // [STACK]
     p->status = BATAL;
     tambahCatatan(p, "Pemesanan dibatalkan.");
+    sinkronAntrean(p);  // [QUEUE] keluar dari antrean
     pesan = "Pemesanan berhasil dibatalkan.";
     return true;
 }
 
+// MLL: lihat pemesanan per wisata (kode awal)
 bool tampilkanPemesananPerWisata(string namaKategori, string namaTempat) {
     TempatWisata* t = cariTempat(namaKategori, namaTempat);
     if (!t) return false;
@@ -607,14 +895,15 @@ bool tampilkanPemesananPerWisata(string namaKategori, string namaTempat) {
     return true;
 }
 
-// ===== Statistik =====
+// Statistik
 
+// MLL: menghitung pemesanan aktif per tempat, lalu diurutkan dengan linked list sementara
 void tampilkanStatistik() {
     Item* daftar = nullptr;
     for (Kategori* k = kepala; k != nullptr; k = k->next) {
         for (TempatWisata* t = k->daftarTempat; t != nullptr; t = t->next) {
-            Item* baru = new Item{t->nama + " (" + k->nama + ")", "", hitungAktif(t), nullptr};
-            sisipUrut(daftar, baru, sebelumNilai);
+            Item* baru = new Item{kunciTempat(k->nama, t->nama), hitungAktif(t), nullptr};
+            sisipUrut(daftar, baru);
         }
     }
 
@@ -634,3 +923,112 @@ void tampilkanStatistik() {
     hapusDaftarItem(daftar);
 }
 
+// [H-3] Jatuh tempo otomatis
+
+// [H-3][QUEUE][STACK] Dipanggil sebelum setiap menu.
+// Pemesanan yang belum lunas dan sudah lewat H-3 dibatalkan otomatis.
+// Aksi undo yang sudah lewat H-3 dibuang dari stack.
+int jalankanJatuhTempo() {
+    int dibatalkan = 0;
+
+    // [QUEUE] Telusuri antrean. Simpan next dulu karena node bisa dilepas.
+    NodeAntrean* n = antreanDepan;
+    while (n) {
+        NodeAntrean* nx = n->next;
+        Pemesanan* p = n->data;
+        if (!masihDalamBatas(p)) {
+            p->status = BATAL;
+            tambahCatatan(p, "Dibatalkan otomatis: belum lunas sampai batas H-3.");
+            sinkronAntrean(p);       // [QUEUE] keluar dari antrean
+            bersihkanAksiUntuk(p);   // [STACK] aksi pemesanan ini tidak boleh di-undo lagi
+            cout << "[Otomatis] " << p->kodeBooking << " (" << p->pemesan.nama
+                 << ") dibatalkan karena belum lunas sampai H-3.\n";
+            dibatalkan++;
+        }
+        n = nx;
+    }
+
+    // [STACK] Buang aksi yang sudah lewat H-3
+    Aksi** pp = &tumpukan;
+    while (*pp) {
+        if (!masihDalamBatas((*pp)->p)) {
+            Aksi* hapus = *pp;
+            *pp = hapus->next;
+            delete hapus;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+
+    return dibatalkan;
+}
+
+// [QUEUE] Antrean konfirmasi 
+
+// [QUEUE][H-3] Memproses pemesanan terdepan lewat konfirmasiInternal
+bool prosesAntreanKonfirmasi(string& pesan) {
+    if (antreanDepan == nullptr) {
+        pesan = "Antrean konfirmasi kosong.";
+        return false;
+    }
+    Pemesanan* p = antreanDepan->data;
+    if (!masihDalamBatas(p)) {  // [H-3]
+        pesan = "Batas pembayaran H-3 sudah lewat untuk pemesanan ini.";
+        return false;
+    }
+
+    // sinkronAntrean di dalam konfirmasiInternal mengeluarkannya dari antrean
+    konfirmasiInternal(p, "konfirmasi antrean " + p->kodeBooking);  // [STACK][QUEUE]
+    pesan = "Pembayaran " + p->kodeBooking + " dikonfirmasi dari antrean.";
+    return true;
+}
+
+// [QUEUE] Menampilkan antrean dari depan ke belakang
+void tampilkanAntrean() {
+    if (antreanDepan == nullptr) {
+        cout << "Antrean konfirmasi kosong.\n";
+        return;
+    }
+    int no = 1;
+    for (NodeAntrean* n = antreanDepan; n != nullptr; n = n->next) {
+        Pemesanan* p = n->data;
+        cout << no++ << ". " << p->kodeBooking
+             << " | " << p->pemesan.nama
+             << " | " << hitungTercatat(p) << " orang"
+             << " | berangkat " << formatTanggal(p->tanggalBerangkat)
+             << " | sisa " << sisaHari(p) << " hari\n";
+    }
+}
+
+// =[STACK] Undo 
+
+// [STACK][H-3] 
+bool undoAksiTerakhir(string& pesan) {
+    if (tumpukan == nullptr) {
+        pesan = "Tidak ada aksi yang bisa di-undo.";
+        return false;
+    }
+
+    Aksi* a = tumpukan;     // [STACK] ambil dari puncak
+    tumpukan = a->next;
+    Pemesanan* p = a->p;
+
+    if (!masihDalamBatas(p)) {  // [H-3]
+        delete a;
+        pesan = "Aksi terakhir sudah melewati batas H-3, tidak bisa di-undo.";
+        return false;
+    }
+
+    if (a->tipe == AKSI_TAMBAH) {
+        hapusPenumpangTerakhir(p);  // penumpang yang ditambahkan selalu di belakang
+        p->jenis = a->jenisLama;
+        p->model = a->modelLama;
+    }
+    p->status = a->statusLama;
+    tambahCatatan(p, "Undo: " + a->deskripsi);
+    sinkronAntrean(p);  // [QUEUE] antrean mengikuti status hasil undo
+
+    pesan = "Undo berhasil: " + a->deskripsi + " (" + p->kodeBooking + ").";
+    delete a;
+    return true;
+}

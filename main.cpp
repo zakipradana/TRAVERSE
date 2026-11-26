@@ -104,14 +104,17 @@ void tampilkanMenu() {
          << " 2. Tambah tempat wisata\n"
          << " 3. Tampilkan katalog\n"
          << " 4. Hapus tempat wisata\n"
-         << " 5. Cari tiket (kode booking)\n"
-         << " 6. Daftar wisata terurut\n"
-         << " 7. Booking\n"
-         << " 8. Tambah penumpang\n"
-         << " 9. Konfirmasi pembayaran\n"
-         << "10. Batalkan pemesanan\n"
+         << " 5. Cari tiket (kode booking)          [BST]\n"
+         << " 6. Daftar wisata terurut              [BST]\n"
+         << " 7. Booking                            [BST][QUEUE]\n"
+         << " 8. Tambah penumpang                   [STACK][QUEUE][H-3]\n"
+         << " 9. Konfirmasi pembayaran              [QUEUE][H-3]\n"
+         << "10. Batalkan pemesanan                 [QUEUE]\n"
          << "11. Lihat pemesanan per wisata\n"
          << "12. Statistik tempat paling ramai\n"
+         << "13. Proses antrean konfirmasi          [QUEUE][H-3]\n"   // [QUEUE] baru
+         << "14. Lihat antrean konfirmasi           [QUEUE]\n"        // [QUEUE] baru
+         << "15. Undo aksi terakhir                 [STACK][H-3]\n"   // [STACK] baru
          << " 0. Keluar\n";
 }
 
@@ -159,6 +162,7 @@ void menuCariTiket() {
     cetakDetailPemesanan(p);
 }
 
+// [BST][QUEUE] Booking: hasilnya masuk indeks BST dan antrean konfirmasi
 void menuBooking() {
     string kat = pilihKategori();
     if (kat.empty()) return;
@@ -197,11 +201,12 @@ void menuBooking() {
     string kode, pesan;
     if (buatPemesanan(kat, tempat, pemesan, anggota, jenis, model, tanggal, kode, pesan)) {
         cout << "Booking berhasil. Kode booking Anda: " << kode << "\n";
+        cout << "Pemesanan masuk antrean konfirmasi pembayaran.\n";  // [QUEUE]
     } else {
         cout << "Gagal: " << pesan << "\n";
     }
 }
-
+// [STACK][QUEUE] Tambah penumpang: perubahan dicatat ke stack untuk undo
 void menuTambahPenumpang() {
     string kode = bacaTeks("Masukkan kode booking: ");
     Pemesanan* p = cariPemesanan(kode);
@@ -243,7 +248,7 @@ void menuTambahPenumpang() {
         cout << "Gagal: " << pesan << "\n";
     }
 }
-
+// [QUEUE][H-3] Konfirmasi manual
 void menuKonfirmasiBayar() {
     string kode = bacaTeks("Masukkan kode booking: ");
     string pesan;
@@ -253,7 +258,7 @@ void menuKonfirmasiBayar() {
         cout << "Gagal: " << pesan << "\n";
     }
 }
-
+// [QUEUE] Batalkan pemesanan manual
 void menuBatalkan() {
     string kode = bacaTeks("Masukkan kode booking: ");
     string pesan;
@@ -273,34 +278,36 @@ void menuPemesananPerWisata() {
     cout << "\nPemesanan untuk " << tempat << ":\n";
     tampilkanPemesananPerWisata(kat, tempat);
 }
-
-// ===== Data awal contoh =====
-
-void dataAwal() {
-    tambahKategori("Pegunungan");
-    tambahTempat("Pegunungan", "Bromo");
-    tambahTempat("Pegunungan", "Kawah Sikidang");
-    tambahTempat("Pegunungan", "Baturaden");
-    tambahTempat("Pegunungan", "Telomoyo");
-
-    tambahKategori("Pantai");
-    tambahTempat("Pantai", "Pantai Parangtritis");
-    tambahTempat("Pantai", "Pantai Kuta");
+// [STACK][H-3] Undo aksi terakhir
+void menuUndo() {
+    string pesan;
+    if (undoAksiTerakhir(pesan)) {
+        cout << pesan << "\n";
+    } else {
+        cout << "Gagal: " << pesan << "\n";
+    }
 }
-
-
-// ===== Program utama =====
+// [QUEUE][H-3] Memproses antrean dari depan
+void menuProsesAntrean() {
+    string pesan;
+    if (prosesAntreanKonfirmasi(pesan)) {
+        cout << pesan << "\n";
+    } else {
+        cout << "Gagal: " << pesan << "\n";
+    }
+}
+// Program utama 
     
 int main() {
     inisialisasiSistem();
-    dataAwal();
-
+   
     int pilihan = -1;
     bool jalan = true;
 
     while (jalan) {
+        jalankanJatuhTempo(); 
         tampilkanMenu();
-        pilihan = bacaAngka("Pilih menu: ", 0, 12);
+        pilihan = bacaAngka("Pilih menu: ", 0, 15);
         cout << "\n";
 
         if (pilihan == 1) {
@@ -312,33 +319,41 @@ int main() {
         else if (pilihan == 3) {
             tampilkanKatalog();
         }
-        
         else if (pilihan == 4) {
             menuHapusTempat();
         }
         else if (pilihan == 5) {
-            menuCariTiket();
+            menuCariTiket();                        // [BST]
         }
         else if (pilihan == 6) {
-            tampilkanWisataTerurut();
+            tampilkanWisataTerurut();               // [BST]
         }
         else if (pilihan == 7) {
-            menuBooking();
+            menuBooking();                          // [BST][QUEUE]
         }
         else if (pilihan == 8) {
-            menuTambahPenumpang();
+            menuTambahPenumpang();                  // [STACK][QUEUE][H-3]
         }
         else if (pilihan == 9) {
-            menuKonfirmasiBayar();
+            menuKonfirmasiBayar();                  // [QUEUE][H-3]
         }
         else if (pilihan == 10) {
-            menuBatalkan();
+            menuBatalkan();                         // [QUEUE]
         }
         else if (pilihan == 11) {
             menuPemesananPerWisata();
         }
         else if (pilihan == 12) {
             tampilkanStatistik();
+        }
+        else if (pilihan == 13) {
+            menuProsesAntrean();                    // [QUEUE][H-3]
+        }
+        else if (pilihan == 14) {
+            tampilkanAntrean();                     // [QUEUE]
+        }
+        else if (pilihan == 15) {
+            menuUndo();                             // [STACK][H-3]
         }
         else if (pilihan == 0) {
             cout << "Terima kasih.\n";
